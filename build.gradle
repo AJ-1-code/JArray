@@ -35,3 +35,21 @@ publishing {
         }
     }
 }
+
+tasks.register('testjarray', JavaExec) {
+    group = 'verification'
+    description = 'Runs the JArray test suite'
+
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'jarray.JArrayTest'
+}
+
+tasks.register('bench', JavaExec) {
+    group = 'verification'
+    description = 'Runs the JArray Benchmark'
+
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'jarray.JArrayBenchmark'
+}
+
+

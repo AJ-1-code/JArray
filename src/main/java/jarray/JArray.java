@@ -12,12 +12,14 @@ public class JArray implements Iterable<Object> {
 
     private final Storage storage;
     private final boolean view;
+    private final boolean contiguous;
     private final int viewSize;
     private final int expectedVersion;
     private final int offset;
 
-    private int[] shape;
+    private int[] dimensions;
     private int[] strides;
+    private boolean tracksSize;
 
     public JArray() {
         this(new int[0]);
@@ -27,34 +29,60 @@ public class JArray implements Iterable<Object> {
 
         this.storage = new Storage();
         this.view = false;
+        this.contiguous = true;
         this.viewSize = 0;
         this.expectedVersion = 0;
         this.offset = 0;
 
         if (shape == null || shape.length == 0) {
-            this.shape = new int[]{0};
+            this.dimensions = new int[]{0};
             this.strides = new int[]{1};
+            this.tracksSize = true;
         } else {
             validateShape(shape);
 
             if (shape.length == 1) {
-                this.shape = new int[]{0};
+                this.dimensions = new int[]{0};
                 this.strides = new int[]{1};
+                this.tracksSize = true;
                 this.storage.ensureCapacity(shape[0]);
             } else {
-                this.shape = Arrays.copyOf(shape, shape.length);
-                this.strides = computeStrides(this.shape);
+                this.dimensions = Arrays.copyOf(shape, shape.length);
+                this.strides = computeStrides(this.dimensions);
+                this.tracksSize = false;
             }
+        }
+    }
+
+    private JArray(Storage storage, int[] shape) {
+
+        this.storage = storage;
+        this.view = false;
+        this.contiguous = true;
+        this.viewSize = 0;
+        this.expectedVersion = 0;
+        this.offset = 0;
+
+        if (shape.length == 1) {
+            this.dimensions = new int[]{storage.size()};
+            this.strides = new int[]{1};
+            this.tracksSize = true;
+        } else {
+            this.dimensions = Arrays.copyOf(shape, shape.length);
+            this.strides = computeStrides(this.dimensions);
+            this.tracksSize = false;
         }
     }
 
     private JArray(Storage storage, int[] shape, int[] strides, int offset) {
         this.storage = storage;
         this.view = true;
-        this.shape = shape;
+        this.dimensions = shape;
         this.strides = strides;
         this.offset = offset;
+        this.tracksSize = false;
         this.viewSize = computeSize(shape);
+        this.contiguous = isRowMajor(shape, strides);
         this.expectedVersion = storage.version();
     }
 
@@ -109,6 +137,22 @@ public class JArray implements Iterable<Object> {
         }
 
         return size;
+    }
+
+    private static boolean isRowMajor(int[] shape, int[] strides) {
+
+        int expected = 1;
+
+        for (int axis = shape.length - 1; axis >= 0; axis--) {
+
+            if (shape[axis] != 1 && strides[axis] != expected) {
+                return false;
+            }
+
+            expected *= shape[axis];
+        }
+
+        return true;
     }
 
     private static int[] resolveShape(int[] requested, int total) {
@@ -168,6 +212,15 @@ public class JArray implements Iterable<Object> {
         return copy;
     }
 
+    private int[] dims() {
+
+        if (tracksSize) {
+            dimensions[0] = storage.size();
+        }
+
+        return dimensions;
+    }
+
     private void requireOwner() {
         if (view) {
             throw new UnsupportedOperationException(
@@ -188,29 +241,34 @@ public class JArray implements Iterable<Object> {
 
         requireValid();
 
-        if (getSize() != computeSize(shape)) {
+        if (getSize() != computeSize(dims())) {
             throw new IllegalStateException(
-                "Array is not completely filled. Shape: " + Arrays.toString(shape)
+                "Array is not completely filled. Shape: " + Arrays.toString(dims())
                 + ", size: " + getSize()
             );
         }
     }
 
     private void checkAxis(int axis) {
-        if (axis < 0 || axis >= shape.length) {
+        if (axis < 0 || axis >= dimensions.length) {
             throw new IllegalArgumentException(
-                "Axis " + axis + " is out of range for " + shape.length + " dimensions."
+                "Axis " + axis + " is out of range for " + dimensions.length
+                + " dimensions."
             );
         }
     }
 
     private void prepareToAdd(int count) {
 
-        requireOwner();
+        if (view) {
+            throw new UnsupportedOperationException(
+                "Views cannot change the size of the array."
+            );
+        }
 
-        if (shape.length > 1 && storage.size() + count > computeSize(shape)) {
+        if (!tracksSize && storage.size() + count > computeSize(dimensions)) {
             throw new IllegalStateException(
-                "Array is full. Shape: " + Arrays.toString(shape)
+                "Array is full. Shape: " + Arrays.toString(dimensions)
             );
         }
     }
@@ -220,12 +278,6 @@ public class JArray implements Iterable<Object> {
             throw new IndexOutOfBoundsException(
                 "Index " + index + " out of bounds for size " + storage.size()
             );
-        }
-    }
-
-    private void syncShape() {
-        if (shape.length == 1) {
-            shape[0] = storage.size();
         }
     }
 
@@ -241,24 +293,47 @@ public class JArray implements Iterable<Object> {
             );
         }
 
-        if (!view) {
-            return flatIndex;
+        if (contiguous) {
+            return offset + flatIndex;
         }
 
         int position = offset;
         int remaining = flatIndex;
 
-        for (int axis = shape.length - 1; axis >= 0; axis--) {
-            position += (remaining % shape[axis]) * strides[axis];
-            remaining /= shape[axis];
+        for (int axis = dimensions.length - 1; axis >= 0; axis--) {
+            position += (remaining % dimensions[axis]) * strides[axis];
+            remaining /= dimensions[axis];
         }
 
         return position;
     }
 
+    private int position(int index) {
+
+        requireValid();
+
+        if (dimensions.length != 1) {
+            throw new IllegalArgumentException(
+                "Expected " + dimensions.length + " indices, but got 1"
+            );
+        }
+
+        int size = view ? viewSize : storage.size();
+
+        if (index < 0 || index >= size) {
+            throw new IndexOutOfBoundsException(
+                "Index " + index + " out of bounds for axis 0 with size " + size
+            );
+        }
+
+        return view ? offset + index * strides[0] : index;
+    }
+
     private int storageIndex(int... indices) {
 
         requireValid();
+
+        int[] shape = dims();
 
         if (indices.length != shape.length) {
             throw new IllegalArgumentException(
@@ -291,32 +366,40 @@ public class JArray implements Iterable<Object> {
 
     private void appendRange(JArray source, int from, int to) {
 
+        if (source.contiguous) {
+            source.requireValid();
+            storage.appendRange(source.storage, source.offset + from, source.offset + to);
+            return;
+        }
+
         storage.ensureCapacity(storage.size() + (to - from));
 
         for (int i = from; i < to; i++) {
             storage.appendFrom(source.storage, source.resolve(i));
         }
-
-        syncShape();
     }
 
-    private boolean isContiguous() {
+    private Storage copyElements() {
 
-        int expected = 1;
+        int size = getSize();
 
-        for (int axis = shape.length - 1; axis >= 0; axis--) {
-
-            if (shape[axis] != 1 && strides[axis] != expected) {
-                return false;
-            }
-
-            expected *= shape[axis];
+        if (contiguous) {
+            return storage.copyRange(offset, offset + size);
         }
 
-        return true;
+        Storage result = new Storage();
+        result.ensureCapacity(size);
+
+        for (int i = 0; i < size; i++) {
+            result.appendFrom(storage, resolve(i));
+        }
+
+        return result;
     }
 
     private JArray removeAxis(int axis, int index) {
+
+        int[] shape = dims();
 
         if (shape.length == 1) {
             return new JArray(
@@ -347,55 +430,46 @@ public class JArray implements Iterable<Object> {
     public void add(byte value) {
         prepareToAdd(1);
         storage.addByte(value);
-        syncShape();
     }
 
     public void add(short value) {
         prepareToAdd(1);
         storage.addShort(value);
-        syncShape();
     }
 
     public void add(int value) {
         prepareToAdd(1);
         storage.addInt(value);
-        syncShape();
     }
 
     public void add(long value) {
         prepareToAdd(1);
         storage.addLong(value);
-        syncShape();
     }
 
     public void add(float value) {
         prepareToAdd(1);
         storage.addFloat(value);
-        syncShape();
     }
 
     public void add(double value) {
         prepareToAdd(1);
         storage.addDouble(value);
-        syncShape();
     }
 
     public void add(char value) {
         prepareToAdd(1);
         storage.addChar(value);
-        syncShape();
     }
 
     public void add(boolean value) {
         prepareToAdd(1);
         storage.addBoolean(value);
-        syncShape();
     }
 
     public void add(Object value) {
         prepareToAdd(1);
         storage.add(value);
-        syncShape();
     }
 
     public void addAll(Iterable<?> values) {
@@ -404,7 +478,6 @@ public class JArray implements Iterable<Object> {
 
         prepareToAdd(snapshot.size());
         storage.insertAll(storage.size(), snapshot);
-        syncShape();
     }
 
     public void addAll(Object... values) {
@@ -417,7 +490,6 @@ public class JArray implements Iterable<Object> {
         checkInsertIndex(index);
 
         storage.insert(index, value);
-        syncShape();
     }
 
     public void insertAll(int index, Iterable<?> values) {
@@ -428,11 +500,14 @@ public class JArray implements Iterable<Object> {
         checkInsertIndex(index);
 
         storage.insertAll(index, snapshot);
-        syncShape();
     }
 
     public void insertAll(int index, Object... values) {
         insertAll(index, Arrays.asList(values));
+    }
+
+    public Object get(int index) {
+        return storage.get(position(index));
     }
 
     public Object get(int... indices) {
@@ -443,12 +518,144 @@ public class JArray implements Iterable<Object> {
         return storage.get(resolve(flatIndex));
     }
 
+    public byte getByte(int index) {
+        return storage.getByte(position(index));
+    }
+
+    public byte getByte(int... indices) {
+        return storage.getByte(storageIndex(indices));
+    }
+
+    public short getShort(int index) {
+        return storage.getShort(position(index));
+    }
+
+    public short getShort(int... indices) {
+        return storage.getShort(storageIndex(indices));
+    }
+
+    public int getInt(int index) {
+        return storage.getInt(position(index));
+    }
+
+    public int getInt(int... indices) {
+        return storage.getInt(storageIndex(indices));
+    }
+
+    public long getLong(int index) {
+        return storage.getLong(position(index));
+    }
+
+    public long getLong(int... indices) {
+        return storage.getLong(storageIndex(indices));
+    }
+
+    public float getFloat(int index) {
+        return storage.getFloat(position(index));
+    }
+
+    public float getFloat(int... indices) {
+        return storage.getFloat(storageIndex(indices));
+    }
+
+    public double getDouble(int index) {
+        return storage.getDouble(position(index));
+    }
+
+    public double getDouble(int... indices) {
+        return storage.getDouble(storageIndex(indices));
+    }
+
+    public char getChar(int index) {
+        return storage.getChar(position(index));
+    }
+
+    public char getChar(int... indices) {
+        return storage.getChar(storageIndex(indices));
+    }
+
+    public boolean getBoolean(int index) {
+        return storage.getBoolean(position(index));
+    }
+
+    public boolean getBoolean(int... indices) {
+        return storage.getBoolean(storageIndex(indices));
+    }
+
+    public void set(Object value, int index) {
+        storage.set(position(index), value);
+    }
+
     public void set(Object value, int... indices) {
         storage.set(storageIndex(indices), value);
     }
 
     public void setFlat(Object value, int flatIndex) {
         storage.set(resolve(flatIndex), value);
+    }
+
+    public void setByte(byte value, int index) {
+        storage.setByte(position(index), value);
+    }
+
+    public void setByte(byte value, int... indices) {
+        storage.setByte(storageIndex(indices), value);
+    }
+
+    public void setShort(short value, int index) {
+        storage.setShort(position(index), value);
+    }
+
+    public void setShort(short value, int... indices) {
+        storage.setShort(storageIndex(indices), value);
+    }
+
+    public void setInt(int value, int index) {
+        storage.setInt(position(index), value);
+    }
+
+    public void setInt(int value, int... indices) {
+        storage.setInt(storageIndex(indices), value);
+    }
+
+    public void setLong(long value, int index) {
+        storage.setLong(position(index), value);
+    }
+
+    public void setLong(long value, int... indices) {
+        storage.setLong(storageIndex(indices), value);
+    }
+
+    public void setFloat(float value, int index) {
+        storage.setFloat(position(index), value);
+    }
+
+    public void setFloat(float value, int... indices) {
+        storage.setFloat(storageIndex(indices), value);
+    }
+
+    public void setDouble(double value, int index) {
+        storage.setDouble(position(index), value);
+    }
+
+    public void setDouble(double value, int... indices) {
+        storage.setDouble(storageIndex(indices), value);
+    }
+
+    public void setChar(char value, int index) {
+        storage.setChar(position(index), value);
+    }
+
+    public void setChar(char value, int... indices) {
+        storage.setChar(storageIndex(indices), value);
+    }
+
+    public void setBoolean(boolean value, int index) {
+        storage.setBoolean(position(index), value);
+    }
+
+    public void setBoolean(boolean value, int... indices) {
+        storage.setBoolean(storageIndex(indices), value);
     }
 
     public void removeAt(int index) {
@@ -462,7 +669,6 @@ public class JArray implements Iterable<Object> {
         }
 
         storage.removeAt(index);
-        syncShape();
     }
 
     public boolean remove(Object value) {
@@ -475,24 +681,18 @@ public class JArray implements Iterable<Object> {
             return false;
         }
 
-        removeAt(index);
+        storage.removeAt(index);
         return true;
     }
 
     public int removeAll(Object value) {
-
         requireOwner();
-
-        int removed = storage.removeEqual(value);
-        syncShape();
-
-        return removed;
+        return storage.removeEqual(value);
     }
 
     public void clear() {
         requireOwner();
         storage.clear();
-        syncShape();
     }
 
     public void ensureCapacity(int minimumCapacity) {
@@ -506,10 +706,17 @@ public class JArray implements Iterable<Object> {
 
     public int indexOf(Object value) {
 
+        requireValid();
+
         int size = getSize();
 
+        if (contiguous) {
+            int found = storage.indexOf(value, offset, offset + size);
+            return found < 0 ? -1 : found - offset;
+        }
+
         for (int i = 0; i < size; i++) {
-            if (Objects.equals(getFlat(i), value)) {
+            if (storage.equalsAt(resolve(i), value)) {
                 return i;
             }
         }
@@ -519,8 +726,17 @@ public class JArray implements Iterable<Object> {
 
     public int lastIndexOf(Object value) {
 
-        for (int i = getSize() - 1; i >= 0; i--) {
-            if (Objects.equals(getFlat(i), value)) {
+        requireValid();
+
+        int size = getSize();
+
+        if (contiguous) {
+            int found = storage.lastIndexOf(value, offset, offset + size);
+            return found < 0 ? -1 : found - offset;
+        }
+
+        for (int i = size - 1; i >= 0; i--) {
+            if (storage.equalsAt(resolve(i), value)) {
                 return i;
             }
         }
@@ -530,11 +746,18 @@ public class JArray implements Iterable<Object> {
 
     public int count(Object value) {
 
+        requireValid();
+
         int size = getSize();
+
+        if (contiguous) {
+            return storage.count(value, offset, offset + size);
+        }
+
         int count = 0;
 
         for (int i = 0; i < size; i++) {
-            if (Objects.equals(getFlat(i), value)) {
+            if (storage.equalsAt(resolve(i), value)) {
                 count++;
             }
         }
@@ -560,31 +783,21 @@ public class JArray implements Iterable<Object> {
             return viewSize;
         }
 
-        if (shape.length == 1) {
-            return storage.metadataCapacity();
+        if (tracksSize) {
+            return storage.capacity();
         }
 
-        return computeSize(shape);
+        return computeSize(dimensions);
     }
 
     public JArray copy() {
-
         requireValid();
-
-        JArray result = new JArray(shape);
-        result.appendRange(this, 0, getSize());
-
-        return result;
+        return new JArray(copyElements(), dims());
     }
 
     public JArray flatten() {
-
         requireValid();
-
-        JArray result = new JArray();
-        result.appendRange(this, 0, getSize());
-
-        return result;
+        return new JArray(copyElements(), new int[]{getSize()});
     }
 
     public JArray reshape(int... newShape) {
@@ -593,7 +806,7 @@ public class JArray implements Iterable<Object> {
 
         int[] resolved = resolveShape(newShape, getSize());
 
-        if (view && !isContiguous()) {
+        if (!contiguous) {
             return copy().reshape(resolved);
         }
 
@@ -617,24 +830,27 @@ public class JArray implements Iterable<Object> {
         other.requireFull();
         checkAxis(axis);
 
-        if (other.shape.length != shape.length) {
+        int[] shape = dims();
+        int[] otherShape = other.dims();
+
+        if (otherShape.length != shape.length) {
             throw new IllegalArgumentException(
                 "Arrays must have the same number of dimensions."
             );
         }
 
         for (int i = 0; i < shape.length; i++) {
-            if (i != axis && shape[i] != other.shape[i]) {
+            if (i != axis && shape[i] != otherShape[i]) {
                 throw new IllegalArgumentException(
                     "Shapes " + Arrays.toString(shape) + " and "
-                    + Arrays.toString(other.shape)
+                    + Arrays.toString(otherShape)
                     + " are not compatible along axis " + axis + "."
                 );
             }
         }
 
         int[] resultShape = Arrays.copyOf(shape, shape.length);
-        resultShape[axis] = shape[axis] + other.shape[axis];
+        resultShape[axis] = shape[axis] + otherShape[axis];
 
         int outer = 1;
         for (int i = 0; i < axis; i++) {
@@ -647,7 +863,7 @@ public class JArray implements Iterable<Object> {
         }
 
         int firstBlock = shape[axis] * inner;
-        int secondBlock = other.shape[axis] * inner;
+        int secondBlock = otherShape[axis] * inner;
 
         JArray result = new JArray(resultShape);
 
@@ -661,7 +877,14 @@ public class JArray implements Iterable<Object> {
 
     public void fill(Object value) {
 
+        requireValid();
+
         int size = getSize();
+
+        if (contiguous) {
+            storage.fill(offset, offset + size, value);
+            return;
+        }
 
         for (int i = 0; i < size; i++) {
             setFlat(value, i);
@@ -682,6 +905,7 @@ public class JArray implements Iterable<Object> {
         requireValid();
 
         final int expected = storage.version();
+        final int size = getSize();
 
         return new Iterator<Object>() {
 
@@ -689,7 +913,7 @@ public class JArray implements Iterable<Object> {
 
             @Override
             public boolean hasNext() {
-                return cursor < getSize();
+                return cursor < size;
             }
 
             @Override
@@ -699,11 +923,13 @@ public class JArray implements Iterable<Object> {
                     throw new ConcurrentModificationException();
                 }
 
-                if (!hasNext()) {
+                if (cursor >= size) {
                     throw new NoSuchElementException();
                 }
 
-                return getFlat(cursor++);
+                int index = cursor++;
+
+                return storage.get(contiguous ? offset + index : resolve(index));
             }
         };
     }
@@ -738,7 +964,7 @@ public class JArray implements Iterable<Object> {
         JArray that = (JArray) other;
         int size = getSize();
 
-        if (!Arrays.equals(shape, that.shape) || size != that.getSize()) {
+        if (!Arrays.equals(dims(), that.dims()) || size != that.getSize()) {
             return false;
         }
 
@@ -754,7 +980,7 @@ public class JArray implements Iterable<Object> {
     @Override
     public int hashCode() {
 
-        int result = Arrays.hashCode(shape);
+        int result = Arrays.hashCode(dims());
         int size = getSize();
 
         for (int i = 0; i < size; i++) {
@@ -769,21 +995,21 @@ public class JArray implements Iterable<Object> {
 
         StringBuilder builder = new StringBuilder();
 
-        if (getSize() != computeSize(shape)) {
+        if (getSize() != computeSize(dims())) {
             builder.append("JArray(shape=")
-                   .append(Arrays.toString(shape))
+                   .append(Arrays.toString(dims()))
                    .append(", size=")
                    .append(getSize())
                    .append(") ")
                    .append(Arrays.toString(toArray()));
         } else {
-            appendNested(builder, 0, 0);
+            appendNested(builder, dims(), 0, 0);
         }
 
         return builder.toString();
     }
 
-    private void appendNested(StringBuilder builder, int axis, int start) {
+    private void appendNested(StringBuilder builder, int[] shape, int axis, int start) {
 
         int block = 1;
         for (int i = axis + 1; i < shape.length; i++) {
@@ -803,7 +1029,7 @@ public class JArray implements Iterable<Object> {
             if (axis == shape.length - 1) {
                 builder.append(getFlat(position));
             } else {
-                appendNested(builder, axis + 1, position);
+                appendNested(builder, shape, axis + 1, position);
             }
         }
 
@@ -814,7 +1040,7 @@ public class JArray implements Iterable<Object> {
         requireFull();
         return new JArray(
             storage,
-            Arrays.copyOf(shape, shape.length),
+            Arrays.copyOf(dims(), dimensions.length),
             Arrays.copyOf(strides, strides.length),
             offset
         );
@@ -826,10 +1052,10 @@ public class JArray implements Iterable<Object> {
 
     public JArray transpose() {
 
-        int[] axes = new int[shape.length];
+        int[] axes = new int[dimensions.length];
 
         for (int i = 0; i < axes.length; i++) {
-            axes[i] = shape.length - 1 - i;
+            axes[i] = axes.length - 1 - i;
         }
 
         return transpose(axes);
@@ -838,6 +1064,8 @@ public class JArray implements Iterable<Object> {
     public JArray transpose(int... axes) {
 
         requireFull();
+
+        int[] shape = dims();
 
         if (axes == null || axes.length != shape.length) {
             throw new IllegalArgumentException(
@@ -878,6 +1106,8 @@ public class JArray implements Iterable<Object> {
         requireFull();
         checkAxis(axis);
 
+        int[] shape = dims();
+
         if (step < 1) {
             throw new IllegalArgumentException("Step must be positive.");
         }
@@ -903,10 +1133,12 @@ public class JArray implements Iterable<Object> {
         requireFull();
         checkAxis(axis);
 
-        if (index < 0 || index >= shape[axis]) {
+        int size = dims()[axis];
+
+        if (index < 0 || index >= size) {
             throw new IndexOutOfBoundsException(
                 "Index " + index + " out of bounds for axis " + axis
-                + " with size " + shape[axis]
+                + " with size " + size
             );
         }
 
@@ -917,7 +1149,9 @@ public class JArray implements Iterable<Object> {
 
         requireFull();
 
+        int[] shape = dims();
         int kept = 0;
+
         for (int dimension : shape) {
             if (dimension != 1) {
                 kept++;
@@ -947,9 +1181,11 @@ public class JArray implements Iterable<Object> {
         requireFull();
         checkAxis(axis);
 
-        if (shape[axis] != 1) {
+        int size = dims()[axis];
+
+        if (size != 1) {
             throw new IllegalArgumentException(
-                "Cannot squeeze axis " + axis + " with size " + shape[axis] + "."
+                "Cannot squeeze axis " + axis + " with size " + size + "."
             );
         }
 
@@ -959,6 +1195,8 @@ public class JArray implements Iterable<Object> {
     public JArray expandDims(int axis) {
 
         requireFull();
+
+        int[] shape = dims();
 
         if (axis < 0 || axis > shape.length) {
             throw new IllegalArgumentException(
@@ -990,10 +1228,11 @@ public class JArray implements Iterable<Object> {
     }
 
     public int getDimensionCount() {
-        return shape.length;
+        return dimensions.length;
     }
 
     public int[] getShape() {
+        int[] shape = dims();
         return Arrays.copyOf(shape, shape.length);
     }
 
@@ -1021,8 +1260,9 @@ public class JArray implements Iterable<Object> {
             );
         }
 
-        this.shape = Arrays.copyOf(newShape, newShape.length);
-        this.strides = computeStrides(this.shape);
+        this.dimensions = Arrays.copyOf(newShape, newShape.length);
+        this.strides = computeStrides(this.dimensions);
+        this.tracksSize = newShape.length == 1;
     }
 
     public int[] getStrides() {

@@ -14,42 +14,28 @@ public enum DataType {
 
     private static final DataType[] VALUES = values();
 
-    byte code() {
-        return (byte) ordinal();
+    static {
+        if (BYTE.ordinal() != Storage.BYTE
+            || SHORT.ordinal() != Storage.SHORT
+            || INT.ordinal() != Storage.INT
+            || LONG.ordinal() != Storage.LONG
+            || FLOAT.ordinal() != Storage.FLOAT
+            || DOUBLE.ordinal() != Storage.DOUBLE
+            || CHAR.ordinal() != Storage.CHAR
+            || BOOLEAN.ordinal() != Storage.BOOLEAN
+            || OBJECT.ordinal() != Storage.OBJECT) {
+            throw new IllegalStateException(
+                "DataType order must match the type codes in Storage."
+            );
+        }
     }
 
-    static DataType fromCode(byte code) {
+    static DataType fromCode(int code) {
         return VALUES[code];
     }
 
     static DataType of(Object value) {
-
-        if (value instanceof Byte) {
-            return BYTE;
-        }
-        if (value instanceof Short) {
-            return SHORT;
-        }
-        if (value instanceof Integer) {
-            return INT;
-        }
-        if (value instanceof Long) {
-            return LONG;
-        }
-        if (value instanceof Float) {
-            return FLOAT;
-        }
-        if (value instanceof Double) {
-            return DOUBLE;
-        }
-        if (value instanceof Character) {
-            return CHAR;
-        }
-        if (value instanceof Boolean) {
-            return BOOLEAN;
-        }
-
-        return OBJECT;
+        return VALUES[Storage.codeOf(value)];
     }
 
     public boolean isPrimitive() {
