@@ -1,3 +1,5 @@
+[![](https://jitpack.io/v/AJ-1-code/JArray.svg)](https://jitpack.io/#AJ-1-code/JArray)
+
 # JArray
 
 **More than an array. More than a list.**
