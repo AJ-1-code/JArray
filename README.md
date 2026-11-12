@@ -174,27 +174,6 @@ dependencies {
 }
 ```
 
-**Maven**
-
-```xml
-<repositories>
-    <repository>
-        <id>jitpack.io</id>
-        <url>https://jitpack.io</url>
-    </repository>
-</repositories>
-
-<dependencies>
-    <dependency>
-        <groupId>com.github.AJ-1-code</groupId>
-        <artifactId>JArray</artifactId>
-        <version>1.0.0</version>
-    </dependency>
-</dependencies>
-```
-
-### Maven Central
-
 Maven Central publication is planned.
 
 Once the first artifact is published, JArray will be available through the standard Maven Central repository.
